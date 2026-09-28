@@ -33,6 +33,11 @@ internal static class Program {
     private const int DIGCF_DEVICEINTERFACE = 0x10;
     private static readonly Guid HidGuid = new Guid("4d1e55b2-f16f-11cf-88cb-001111000030");
     private static readonly Guid UsbGuid = new Guid("A5DCBF10-6530-11D2-901F-00C04FB951ED");
+    private const string BoardVidPid = "VID_16C0&PID_27E9";
+    private const string BootVidPid = "VID_16D0&PID_0753";
+    private const byte HidCmdSetKey = 0xA5;
+    private const byte HidCmdToggle = 0xA6;
+    private const byte HidCmdSetSpeed = 0xA7;
 
     private static readonly Color UiBg = Color.FromArgb(246, 247, 250);
     private static readonly Color UiText = Color.FromArgb(28, 28, 30);
@@ -59,6 +64,7 @@ internal static class Program {
         "Настройки\r\n" +
         "Клавиша — что тапает плата. Нажми поле и клавишу на клавиатуре.\r\n" +
         "Команда — чем включать: боковая кнопка мыши или сочетание, например Ctrl+A.\r\n" +
+        "Обе боковые: в режиме захвата нажми Back и Forward вместе.\r\n" +
         "После новой команды окно отпускает фокус, чтобы тап не попал сюда.\r\n" +
         "Скорость: 1 — чаще 209–322 мс, 10 — чаще 49–282 мс. Короткие и длинные паузы реже.\r\n" +
         "Маячок у ползунка моргает в том же ритме.\r\n" +
@@ -97,7 +103,7 @@ internal static class Program {
     private static int _cmdMode = 3;
     private static int _cmdVk;
     private static int _cmdMods;
-    private static byte[] _payload = new byte[] { 0xA6 };
+    private static byte[] _payload = new byte[] { HidCmdToggle };
     private static IntPtr _hook;
     private static LowLevelMouseProc _hookProc = Hook;
 
@@ -611,7 +617,7 @@ internal static class Program {
 
     static void Run() {
         bool created;
-        using (new System.Threading.Mutex(true, "F-Tapper-single-instance", out created)) {
+        using (new System.Threading.Mutex(true, @"Global\F-Tapper-single-instance", out created)) {
             if (!created) {
                 MessageBox.Show("F-Tapper уже запущен.", "F-Tapper");
                 return;
@@ -659,11 +665,17 @@ internal static class Program {
         }
     }
 
-    private static bool OverOwnUi() {
-        if (_ui == null || _ui.IsDisposed) return false;
-        Point p = Cursor.Position;
-        if (_ui.Visible && _ui.Bounds.Contains(p)) return true;
-        return false;
+    private static bool PathHasVidPid(string path, string vidPid) {
+        if (string.IsNullOrEmpty(path)) return false;
+        return path.ToUpperInvariant().IndexOf(vidPid, StringComparison.Ordinal) >= 0;
+    }
+
+    private static bool PathIsOurBoard(string path) {
+        return PathHasVidPid(path, BoardVidPid);
+    }
+
+    private static bool PathIsBootloader(string path) {
+        return PathHasVidPid(path, BootVidPid);
     }
 
     private static bool CmdWantsX(int xbtn) {
@@ -739,15 +751,16 @@ internal static class Program {
     private static void Fire() {
         if (_flashing) return;
         if ((DateTime.UtcNow - _lastSend).TotalMilliseconds < 400) return;
-        _lastSend = DateTime.UtcNow;
         string t = DateTime.Now.ToString("HH:mm:ss");
         ShowService(Color.Gold, "сигнал: " + t + " поймал");
         bool ok = SendToBoard();
         if (ok) {
+            _lastSend = DateTime.UtcNow;
             _enabled = !_enabled;
             ShowPower();
             ShowService(Color.Lime, "сигнал: " + t + " OK");
         } else {
+            _lastSend = DateTime.UtcNow.AddMilliseconds(-300);
             ShowService(Color.OrangeRed, "сигнал: " + t + " FAIL");
         }
     }
@@ -837,10 +850,14 @@ internal static class Program {
 
     private static void BeginCapture(int mode) {
         _capture = mode;
+        if (_ui != null && !_ui.IsDisposed) {
+            ShowWindow();
+            _ui.Focus();
+        }
         if (mode == 1)
             SetHint("Нажми на клавиатуре клавишу, которую должна тапать плата. Esc — отмена.");
         else
-            SetHint("Нажми боковую кнопку, клавишу или сочетание, например Ctrl+A. Esc — отмена.");
+            SetHint("Боковая кнопка, обе сразу — обе кнопки, или Ctrl+A. Esc — отмена.");
     }
 
     private static void CancelCapture() {
@@ -900,7 +917,10 @@ internal static class Program {
         if (_capture != 2) return;
         _cmdVk = 0;
         _cmdMods = 0;
-        _cmdMode = (xbtn == XBUTTON1) ? 1 : 2;
+        bool x1 = (GetAsyncKeyState(VK_XBUTTON1) & 0x8000) != 0 || xbtn == XBUTTON1;
+        bool x2 = (GetAsyncKeyState(VK_XBUTTON2) & 0x8000) != 0 || xbtn == XBUTTON2;
+        if (x1 && x2) _cmdMode = 3;
+        else _cmdMode = (xbtn == XBUTTON1) ? 1 : 2;
         _capture = 0;
         SaveSettings();
         RefreshSettingFields();
@@ -926,12 +946,11 @@ internal static class Program {
                         if (c == "back") { _cmdMode = 1; _cmdVk = 0; }
                         else if (c == "forward") { _cmdMode = 2; _cmdVk = 0; }
                         else if (c == "both") { _cmdMode = 3; _cmdVk = 0; }
+                        else if (c == "key") { _cmdMode = 0; }
                     } else if (line.StartsWith("vk=")) {
                         int n;
-                        if (int.TryParse(line.Substring(3).Trim(), out n) && n > 0) {
-                            _cmdMode = 0;
+                        if (int.TryParse(line.Substring(3).Trim(), out n) && n > 0)
                             _cmdVk = n;
-                        }
                     } else if (line.StartsWith("speed=")) {
                         int n;
                         if (int.TryParse(line.Substring(6).Trim(), out n) && n >= 1 && n <= 10) _tapSpeed = (byte)n;
@@ -970,11 +989,11 @@ internal static class Program {
     }
 
     private static bool PushTapKey() {
-        _payload = new byte[] { 0xA5, _tapScan };
+        _payload = new byte[] { HidCmdSetKey, _tapScan };
         try {
             return SendToBoard();
         } finally {
-            _payload = new byte[] { 0xA6 };
+            _payload = new byte[] { HidCmdToggle };
         }
     }
 
@@ -996,11 +1015,11 @@ internal static class Program {
         if (loB < 2) loB = 2;
         if (hiB > 255) hiB = 255;
         if (hiB < loB) hiB = loB;
-        _payload = new byte[] { 0xA7, (byte)loB, (byte)hiB };
+        _payload = new byte[] { HidCmdSetSpeed, (byte)loB, (byte)hiB };
         try {
             return SendToBoard();
         } finally {
-            _payload = new byte[] { 0xA6 };
+            _payload = new byte[] { HidCmdToggle };
         }
     }
 
@@ -1032,21 +1051,6 @@ internal static class Program {
         SetHint(why + " Нажми «Прошить».");
         if (_ui != null && !_ui.IsDisposed && _ui.SettingsPane != null && !_ui.SettingsPane.Visible)
             _ui.ShowSettings();
-    }
-
-    private static void FlashStatus(bool busy, Color color, string text) {
-        if (_ui == null || _ui.IsDisposed) return;
-        if (_ui.InvokeRequired) {
-            _ui.BeginInvoke(new Action(delegate { FlashStatus(busy, color, text); }));
-            return;
-        }
-        _ui.FlashBtn.Enabled = !busy;
-        ShowService(color, text);
-        SetHint(text);
-        if (!busy) {
-            bool ok = color.ToArgb() == Color.Lime.ToArgb();
-            TellFlashDone(ok, text);
-        }
     }
 
     private static void TellFlashDone(bool ok, string detail) {
@@ -1271,7 +1275,7 @@ internal static class Program {
                 if (!mem.TryGetValue(a + 1, out b1) || b1 != 0x54) continue;
                 if (!mem.TryGetValue(a + 2, out b2) || b2 != 0x41) continue;
                 if (!mem.TryGetValue(a + 3, out b3) || b3 != 0x50) continue;
-                if (!mem.TryGetValue(a + 4, out b4) || b4 != 0xA5) continue;
+                if (!mem.TryGetValue(a + 4, out b4) || b4 != HidCmdSetKey) continue;
                 if (!mem.TryGetValue(a + 5, out b5) || !mem.TryGetValue(a + 6, out b6) || !mem.TryGetValue(a + 7, out b7)) continue;
                 if (b5 == 0 && b6 == 0 && b7 == 0) return null;
                 return new byte[] { b5, b6, b7 };
@@ -1297,7 +1301,7 @@ internal static class Program {
                     if (!SetupDiGetDeviceInterfaceDetail(list, ref did, det, need, out need, IntPtr.Zero)) continue;
                     string path = ReadHidPath(det);
                     if (path == null) continue;
-                    if (path.ToUpperInvariant().IndexOf("VID_16C0") < 0) continue;
+                    if (!PathIsOurBoard(path)) continue;
                     using (SafeFileHandle h = OpenHid(path)) {
                         if (h == null || h.IsInvalid) continue;
                         int featLen = 4;
@@ -1372,13 +1376,18 @@ internal static class Program {
         ShowService(Color.Gold, "Драйвера нет. Ставлю из программы...");
         System.Threading.ThreadPool.QueueUserWorkItem(delegate {
             bool ok = false;
+            string drvDir = null;
             try {
-                string dir = Path.Combine(Path.GetTempPath(), "F-Tapper-flash");
-                Directory.CreateDirectory(dir);
-                InstallBootDriver(dir);
+                drvDir = Path.Combine(Path.GetTempPath(), "F-Tapper-drv-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(drvDir);
+                InstallBootDriver(drvDir);
                 ok = DriverInstalled();
             } catch (Exception ex) {
                 FlashLog("driver " + ex.Message);
+            } finally {
+                if (drvDir != null) {
+                    try { Directory.Delete(drvDir, true); } catch { }
+                }
             }
             if (_ui == null || _ui.IsDisposed) return;
             bool installed = ok;
@@ -1402,6 +1411,23 @@ internal static class Program {
         _ui.FlashBtn.Enabled = true;
     }
 
+    private static void KillLeftoverMicronucleus() {
+        Process[] old = Process.GetProcessesByName("micronucleus");
+        for (int i = 0; i < old.Length; i++) {
+            try {
+                string path = null;
+                try { path = old[i].MainModule.FileName; } catch { }
+                if (string.IsNullOrEmpty(path)) continue;
+                if (path.IndexOf("F-Tapper-flash", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                old[i].Kill();
+                FlashLog("killed leftover micronucleus pid=" + old[i].Id);
+            } catch { }
+            finally {
+                try { old[i].Dispose(); } catch { }
+            }
+        }
+    }
+
     private static void FlashBoard() {
         if (_flashing) return;
         _flashing = true;
@@ -1412,8 +1438,9 @@ internal static class Program {
         FlashLog("log " + _flashLog);
         System.Threading.ThreadPool.QueueUserWorkItem(delegate {
             Process p = null;
+            string dir = null;
             try {
-                string dir = Path.Combine(Path.GetTempPath(), "F-Tapper-flash");
+                dir = Path.Combine(Path.GetTempPath(), "F-Tapper-flash-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(dir);
                 if (_enabled) {
                     bool stopped = SendToBoard();
@@ -1423,10 +1450,7 @@ internal static class Program {
                 } else {
                     FlashLog("tapper already off");
                 }
-                Process[] old = Process.GetProcessesByName("micronucleus");
-                for (int i = 0; i < old.Length; i++) {
-                    try { old[i].Kill(); FlashLog("killed old micronucleus"); } catch { }
-                }
+                KillLeftoverMicronucleus();
                 string mn = Path.Combine(dir, "micronucleus.exe");
                 string hex = Path.Combine(dir, "F-Tapper.ino.hex");
                 ExtractResource("micronucleus.exe", mn);
@@ -1502,6 +1526,12 @@ internal static class Program {
                 if (_ui != null)
                     _ui.BeginInvoke(new Action(delegate { TellFlashDone(false, msg); }));
             } finally {
+                if (p != null) {
+                    try { p.Dispose(); } catch { }
+                }
+                if (dir != null) {
+                    try { Directory.Delete(dir, true); } catch { }
+                }
                 _flashing = false;
                 ResetFlashBtn();
                 FlashLog("flash finished");
@@ -1530,7 +1560,12 @@ internal static class Program {
             }
         }
         IntPtr h = bmp.GetHicon();
-        return Icon.FromHandle(h);
+        Icon clone;
+        using (var tmp = Icon.FromHandle(h))
+            clone = (Icon)tmp.Clone();
+        DestroyIcon(h);
+        bmp.Dispose();
+        return clone;
     }
 
     private static bool BoardPresent() {
@@ -1553,7 +1588,7 @@ internal static class Program {
                     if (!SetupDiGetDeviceInterfaceDetail(list, ref did, det, need, out need, IntPtr.Zero)) continue;
                     string path = ReadHidPath(det);
                     if (path == null) continue;
-                    if (path.ToUpperInvariant().IndexOf("VID_16C0") >= 0) return true;
+                    if (PathIsOurBoard(path)) return true;
                 } finally {
                     Marshal.FreeHGlobal(det);
                 }
@@ -1585,7 +1620,7 @@ internal static class Program {
                     string a = Marshal.PtrToStringUni(new IntPtr(det.ToInt64() + 4));
                     string b = Marshal.PtrToStringUni(new IntPtr(det.ToInt64() + 8));
                     string s = ((a ?? "") + " " + (b ?? "")).ToUpperInvariant();
-                    if (s.IndexOf("VID_16C0") >= 0 || s.IndexOf("VID_16D0") >= 0) return true;
+                    if (PathIsOurBoard(s) || PathIsBootloader(s)) return true;
                 } finally {
                     Marshal.FreeHGlobal(det);
                 }
@@ -1602,6 +1637,14 @@ internal static class Program {
         if (on && !_boardLinked) {
             PushTapKey();
             bool speedOk = PushSpeed();
+            if (_enabled) {
+                bool synced = SendToBoard();
+                FlashLog("enable sync after link send=" + synced);
+                if (!synced) {
+                    _enabled = false;
+                    ShowPower();
+                }
+            }
             if (_speedAfterFlash) {
                 int lo, hi;
                 PauseRange(_tapSpeed, out lo, out hi);
@@ -1616,7 +1659,7 @@ internal static class Program {
     }
 
     private static bool SendToBoard() {
-        if (!string.IsNullOrEmpty(_hidPath) && TrySendPath(_hidPath)) return true;
+        if (!string.IsNullOrEmpty(_hidPath) && PathIsOurBoard(_hidPath) && TrySendPath(_hidPath)) return true;
         Guid g = HidGuid;
         IntPtr list = SetupDiGetClassDevs(ref g, null, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
         if (list == IntPtr.Zero || list == new IntPtr(-1)) return false;
@@ -1633,7 +1676,7 @@ internal static class Program {
                     if (!SetupDiGetDeviceInterfaceDetail(list, ref did, det, need, out need, IntPtr.Zero)) continue;
                     string path = ReadHidPath(det);
                     if (path == null) continue;
-                    if (path.ToUpperInvariant().IndexOf("VID_16C0") < 0) continue;
+                    if (!PathIsOurBoard(path)) continue;
                     if (TrySendPath(path)) {
                         _hidPath = path;
                         return true;
