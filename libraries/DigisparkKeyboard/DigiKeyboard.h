@@ -33,7 +33,7 @@ volatile uchar tapSpeed = 5;
 volatile unsigned tapGapLo = 130;
 volatile unsigned tapGapHi = 310;
 const uchar fwStamp[8] PROGMEM = { 0x46, 0x54, 0x41, 0x50, 0xA5, 0x00, 0x00, 0x00 };
-static uchar fwIdReply[3];
+static uchar fwIdReply[4];
 
 const PROGMEM uchar usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] = {
         0x05, 0x01,                    // USAGE_PAGE (Generic Desktop)
@@ -62,7 +62,7 @@ const PROGMEM uchar usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH]
         0x95, 0x01,                    //   REPORT_COUNT (1)
         0x75, 0x03,                    //   REPORT_SIZE (3)
         0x91, 0x03,                    //   OUTPUT (LED pad)
-        0x95, 0x03,                    //   REPORT_COUNT (3)
+        0x95, 0x04,                    //   REPORT_COUNT (4)
         0x75, 0x08,                    //   REPORT_SIZE (8)
         0x15, 0x00,                    //   LOGICAL_MINIMUM (0)
         0x26, 0xff, 0x00,              //   LOGICAL_MAXIMUM (255)
@@ -242,8 +242,9 @@ uchar usbFunctionSetup(uchar data[8]) {
                 fwIdReply[0] = pgm_read_byte(fwStamp + 5);
                 fwIdReply[1] = pgm_read_byte(fwStamp + 6);
                 fwIdReply[2] = pgm_read_byte(fwStamp + 7);
+                fwIdReply[3] = tapEnabled ? 1 : 0;
                 usbMsgPtr = fwIdReply;
-                return 3;
+                return 4;
             }
             return 0;
         } else if (rq->bRequest == USBRQ_HID_SET_IDLE) {
@@ -297,6 +298,17 @@ uchar usbFunctionWrite(uchar *data, uchar len) {
     if (cmd == 0xA6 && hidCmdArmed && hidDebounce == 0) {
         tapEnabled = !tapEnabled;
         hidDebounce = 250;
+        return 1;
+    }
+    if (cmd == 0xA8 && hidCmdArmed) {
+        tapEnabled = 0;
+        hidDebounce = 50;
+        return 1;
+    }
+    if (cmd == 0xA9 && hidCmdArmed) {
+        tapEnabled = 1;
+        hidDebounce = 50;
+        return 1;
     }
     return 1;
 }

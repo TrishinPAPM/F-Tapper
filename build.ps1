@@ -38,18 +38,21 @@ function Patch-HexStamp {
     }
     if ($stampAt -lt 0) { throw "FTAP stamp marker not found in hex" }
 
-    $crc = [uint32]0xFFFFFFFF
+    $crc = [Convert]::ToUInt32('FFFFFFFF', 16)
     for ($a = $min; $a -le $max; $a++) {
         $v = if ($a -ge $stampAt -and $a -le ($stampAt + 2)) { [byte]0 }
              elseif ($map.ContainsKey($a)) { $map[$a] }
              else { [byte]0xFF }
-        $crc = $crc -bxor $v
+        $crc = $crc -bxor [uint32]$v
         for ($b = 0; $b -lt 8; $b++) {
-            if (($crc -band 1) -ne 0) { $crc = ($crc -shr 1) -bxor 0xEDB88320 }
-            else { $crc = $crc -shr 1 }
+            if (($crc -band [uint32]1) -ne 0) {
+                $crc = ($crc -shr 1) -bxor [Convert]::ToUInt32('EDB88320', 16)
+            } else {
+                $crc = $crc -shr 1
+            }
         }
     }
-    $crc = $crc -bxor 0xFFFFFFFF
+    $crc = $crc -bxor [Convert]::ToUInt32('FFFFFFFF', 16)
     $s0 = [byte]($crc -band 0xFF)
     $s1 = [byte](($crc -shr 8) -band 0xFF)
     $s2 = [byte](($crc -shr 16) -band 0xFF)

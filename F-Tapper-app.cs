@@ -38,6 +38,13 @@ internal static class Program {
     private const byte HidCmdSetKey = 0xA5;
     private const byte HidCmdToggle = 0xA6;
     private const byte HidCmdSetSpeed = 0xA7;
+    private const byte HidCmdOff = 0xA8;
+    private const byte HidCmdOn = 0xA9;
+    private static readonly object _hidGate = new object();
+    private static int _cmdMousePending;
+    private static DateTime _cmdMouseAt = DateTime.MinValue;
+    private static bool _needEnableSync;
+    private static DateTime _linkAt = DateTime.MinValue;
 
     private static readonly Color UiBg = Color.FromArgb(246, 247, 250);
     private static readonly Color UiText = Color.FromArgb(28, 28, 30);
@@ -64,7 +71,7 @@ internal static class Program {
         "Настройки\r\n" +
         "Клавиша — что тапает плата. Нажми поле и клавишу на клавиатуре.\r\n" +
         "Команда — чем включать: боковая кнопка мыши или сочетание, например Ctrl+A.\r\n" +
-        "Обе боковые: в режиме захвата нажми Back и Forward вместе.\r\n" +
+        "Обе боковые: в режиме захвата нажми Back, затем Forward за полсекунды (или наоборот).\r\n" +
         "После новой команды окно отпускает фокус, чтобы тап не попал сюда.\r\n" +
         "Скорость: 1 — чаще 209–322 мс, 10 — чаще 49–282 мс. Короткие и длинные паузы реже.\r\n" +
         "Маячок у ползунка моргает в том же ритме.\r\n" +
@@ -716,7 +723,19 @@ internal static class Program {
     }
 
     private static void PollMouse() {
-        if (_flashing || _capture != 0) return;
+        if (_flashing) return;
+        if (_capture == 2 && _cmdMousePending != 0) {
+            bool x1 = (GetAsyncKeyState(VK_XBUTTON1) & 0x8000) != 0;
+            bool x2 = (GetAsyncKeyState(VK_XBUTTON2) & 0x8000) != 0;
+            if (x1 && x2) {
+                FinishCmdMouse(3);
+                return;
+            }
+            if ((DateTime.UtcNow - _cmdMouseAt).TotalMilliseconds >= 500)
+                FinishCmdMouse(_cmdMousePending);
+            return;
+        }
+        if (_capture != 0) return;
         bool down = CmdIsDown();
         if (down && !_x1WasDown) Fire();
         _x1WasDown = down;
@@ -737,12 +756,7 @@ internal static class Program {
             if ((buttonFlags & RI_MOUSE_BUTTON_4_DOWN) != 0) xbtn = XBUTTON1;
             else if ((buttonFlags & RI_MOUSE_BUTTON_5_DOWN) != 0) xbtn = XBUTTON2;
             if (xbtn == 0) return;
-            if (_capture == 2) {
-                ApplyCmdMouse(xbtn);
-                return;
-            }
-            if (_capture != 0) return;
-            if (CmdWantsX(xbtn)) Fire();
+            if (_capture == 2) ApplyCmdMouse(xbtn);
         } finally {
             Marshal.FreeHGlobal(buf);
         }
@@ -753,10 +767,11 @@ internal static class Program {
         if ((DateTime.UtcNow - _lastSend).TotalMilliseconds < 400) return;
         string t = DateTime.Now.ToString("HH:mm:ss");
         ShowService(Color.Gold, "сигнал: " + t + " поймал");
-        bool ok = SendToBoard();
+        bool want = !_enabled;
+        bool ok = SetTapper(want);
         if (ok) {
             _lastSend = DateTime.UtcNow;
-            _enabled = !_enabled;
+            _enabled = want;
             ShowPower();
             ShowService(Color.Lime, "сигнал: " + t + " OK");
         } else {
@@ -850,6 +865,7 @@ internal static class Program {
 
     private static void BeginCapture(int mode) {
         _capture = mode;
+        _cmdMousePending = 0;
         if (_ui != null && !_ui.IsDisposed) {
             ShowWindow();
             _ui.Focus();
@@ -857,11 +873,12 @@ internal static class Program {
         if (mode == 1)
             SetHint("Нажми на клавиатуре клавишу, которую должна тапать плата. Esc — отмена.");
         else
-            SetHint("Боковая кнопка, обе сразу — обе кнопки, или Ctrl+A. Esc — отмена.");
+            SetHint("Боковая кнопка; для обеих — нажми Back и Forward за 0.5 с. Esc — отмена.");
     }
 
     private static void CancelCapture() {
         _capture = 0;
+        _cmdMousePending = 0;
         if (_needFlash)
             SetHint("Нужно прошить плату, чтобы применить настройки. Нажми «Прошить».");
         else
@@ -915,12 +932,23 @@ internal static class Program {
 
     private static void ApplyCmdMouse(int xbtn) {
         if (_capture != 2) return;
+        if (_cmdMousePending == 0) {
+            _cmdMousePending = xbtn;
+            _cmdMouseAt = DateTime.UtcNow;
+            SetHint("Ещё нажми другую боковую для «обе», или подожди 0.5 с.");
+            return;
+        }
+        if (_cmdMousePending != xbtn) FinishCmdMouse(3);
+        else FinishCmdMouse(xbtn);
+    }
+
+    private static void FinishCmdMouse(int modeOrBtn) {
+        if (_capture != 2) return;
         _cmdVk = 0;
         _cmdMods = 0;
-        bool x1 = (GetAsyncKeyState(VK_XBUTTON1) & 0x8000) != 0 || xbtn == XBUTTON1;
-        bool x2 = (GetAsyncKeyState(VK_XBUTTON2) & 0x8000) != 0 || xbtn == XBUTTON2;
-        if (x1 && x2) _cmdMode = 3;
-        else _cmdMode = (xbtn == XBUTTON1) ? 1 : 2;
+        if (modeOrBtn == 3) _cmdMode = 3;
+        else _cmdMode = (modeOrBtn == XBUTTON1) ? 1 : 2;
+        _cmdMousePending = 0;
         _capture = 0;
         SaveSettings();
         RefreshSettingFields();
@@ -988,13 +1016,73 @@ internal static class Program {
         }
     }
 
-    private static bool PushTapKey() {
-        _payload = new byte[] { HidCmdSetKey, _tapScan };
-        try {
-            return SendToBoard();
-        } finally {
-            _payload = new byte[] { HidCmdToggle };
+    private static bool SendCommand(byte[] cmd) {
+        lock (_hidGate) {
+            byte[] prev = _payload;
+            _payload = cmd;
+            try {
+                return SendToBoard();
+            } finally {
+                _payload = prev;
+            }
         }
+    }
+
+    private static bool? ReadTapEnabled() {
+        Guid g = HidGuid;
+        IntPtr list = SetupDiGetClassDevs(ref g, null, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (list == IntPtr.Zero || list == new IntPtr(-1)) return null;
+        try {
+            for (uint i = 0; ; i++) {
+                var did = new SP_DEVICE_INTERFACE_DATA();
+                did.cbSize = Marshal.SizeOf(did);
+                if (!SetupDiEnumDeviceInterfaces(list, IntPtr.Zero, ref g, i, ref did)) break;
+                uint need;
+                SetupDiGetDeviceInterfaceDetail(list, ref did, IntPtr.Zero, 0, out need, IntPtr.Zero);
+                IntPtr det = Marshal.AllocHGlobal((int)need);
+                try {
+                    Marshal.WriteInt32(det, IntPtr.Size == 8 ? 8 : 6);
+                    if (!SetupDiGetDeviceInterfaceDetail(list, ref did, det, need, out need, IntPtr.Zero)) continue;
+                    string path = ReadHidPath(det);
+                    if (path == null || !PathIsOurBoard(path)) continue;
+                    using (SafeFileHandle h = OpenHid(path)) {
+                        if (h == null || h.IsInvalid) continue;
+                        int featLen = 0;
+                        IntPtr pre;
+                        if (HidD_GetPreparsedData(h, out pre)) {
+                            HIDP_CAPS caps;
+                            HidP_GetCaps(pre, out caps);
+                            featLen = caps.FeatureReportByteLength;
+                            HidD_FreePreparsedData(pre);
+                        }
+                        if (featLen < 5) return null;
+                        byte[] buf = new byte[featLen];
+                        if (!HidD_GetFeature(h, buf, buf.Length)) continue;
+                        return buf[4] != 0;
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(det);
+                }
+            }
+        } finally {
+            SetupDiDestroyDeviceInfoList(list);
+        }
+        return null;
+    }
+
+    private static bool SetTapper(bool on) {
+        if (!SendCommand(new byte[] { on ? HidCmdOn : HidCmdOff })) return false;
+        System.Threading.Thread.Sleep(30);
+        bool? got = ReadTapEnabled();
+        if (got == null) {
+            if (!SendCommand(new byte[] { HidCmdToggle })) return false;
+            return true;
+        }
+        return got.Value == on;
+    }
+
+    private static bool PushTapKey() {
+        return SendCommand(new byte[] { HidCmdSetKey, _tapScan });
     }
 
     private static void PauseRange(int speed, out int lo, out int hi) {
@@ -1015,12 +1103,7 @@ internal static class Program {
         if (loB < 2) loB = 2;
         if (hiB > 255) hiB = 255;
         if (hiB < loB) hiB = loB;
-        _payload = new byte[] { HidCmdSetSpeed, (byte)loB, (byte)hiB };
-        try {
-            return SendToBoard();
-        } finally {
-            _payload = new byte[] { HidCmdToggle };
-        }
+        return SendCommand(new byte[] { HidCmdSetSpeed, (byte)loB, (byte)hiB });
     }
 
     private static void ApplySpeed() {
@@ -1225,7 +1308,7 @@ internal static class Program {
             ShowPower();
             return true;
         }
-        bool stopped = SendToBoard();
+        bool stopped = SetTapper(false);
         FlashLog("tapper stop send=" + stopped);
         if (!stopped) {
             ShowService(Color.OrangeRed, "Тапер не выключился.");
@@ -1443,10 +1526,16 @@ internal static class Program {
                 dir = Path.Combine(Path.GetTempPath(), "F-Tapper-flash-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(dir);
                 if (_enabled) {
-                    bool stopped = SendToBoard();
+                    bool stopped = SetTapper(false);
+                    FlashLog("tapper stopped send=" + stopped);
+                    if (!stopped) {
+                        _ui.BeginInvoke(new Action(delegate {
+                            TellFlashDone(false, "Тапер не выключился.");
+                        }));
+                        return;
+                    }
                     _enabled = false;
                     ShowPower();
-                    FlashLog("tapper stopped send=" + stopped);
                 } else {
                     FlashLog("tapper already off");
                 }
@@ -1635,16 +1724,10 @@ internal static class Program {
         if (_flashing || _tray == null) return;
         bool on = BoardPresent();
         if (on && !_boardLinked) {
+            _linkAt = DateTime.UtcNow;
+            _needEnableSync = _enabled;
             PushTapKey();
             bool speedOk = PushSpeed();
-            if (_enabled) {
-                bool synced = SendToBoard();
-                FlashLog("enable sync after link send=" + synced);
-                if (!synced) {
-                    _enabled = false;
-                    ShowPower();
-                }
-            }
             if (_speedAfterFlash) {
                 int lo, hi;
                 PauseRange(_tapSpeed, out lo, out hi);
@@ -1652,6 +1735,18 @@ internal static class Program {
                 _speedAfterFlash = false;
             }
         }
+        if (on && _needEnableSync && (DateTime.UtcNow - _linkAt).TotalMilliseconds >= 2500) {
+            _needEnableSync = false;
+            if (_enabled) {
+                bool synced = SetTapper(true);
+                FlashLog("enable sync after arm send=" + synced);
+                if (!synced) {
+                    _enabled = false;
+                    ShowPower();
+                }
+            }
+        }
+        if (!on) _needEnableSync = false;
         if (on == _boardLinked && _tray.Icon != null) return;
         _boardLinked = on;
         _tray.Icon = on ? _iconOn : _iconOff;
@@ -1759,10 +1854,8 @@ internal static class Program {
             if (msg == WM_XBUTTONDOWN) {
                 var hs = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
                 int xbtn = (hs.mouseData >> 16) & 0xFFFF;
-                if (xbtn == XBUTTON1 || xbtn == XBUTTON2) {
-                    if (_capture == 2) ApplyCmdMouse(xbtn);
-                    else if (_capture == 0 && CmdWantsX(xbtn)) Fire();
-                }
+                if ((xbtn == XBUTTON1 || xbtn == XBUTTON2) && _capture == 2)
+                    ApplyCmdMouse(xbtn);
             }
         }
         return CallNextHookEx(_hook, nCode, wParam, lParam);
