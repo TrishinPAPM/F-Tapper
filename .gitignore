@@ -1,0 +1,25 @@
+# Build output
+F-Tapper.exe
+F-Tapper-new.exe
+*.pdb
+*.ilk
+*.obj
+
+# Local / debug
+debug-mouse.ps1
+listen-hid.ps1
+test-tapper.ps1
+PUBLISH.md
+*.log
+
+# Tooling / IDE
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
+
+# Firmware temp build
+ftapper-build/
+build/

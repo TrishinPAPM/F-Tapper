@@ -19,7 +19,13 @@ static void armWait() {
   }
   if (lo < 20) lo = 20;
   if (hi < lo) hi = lo;
-  waitLeft = (hi <= lo) ? lo : lo + (unsigned)random(hi - lo + 1);
+  if (hi <= lo) waitLeft = lo;
+  else {
+    unsigned span = hi - lo;
+    unsigned a = (unsigned)random(span + 1);
+    unsigned b = (unsigned)random(span + 1);
+    waitLeft = lo + (a + b) / 2;
+  }
   extraUs = (unsigned)random(1000);
 }
 

@@ -46,6 +46,10 @@ internal static class Program {
         "Подходит Digispark на ATtiny85 с загрузчиком micronucleus, такт 16.5 МГц.\r\n" +
         "Клоны этой платы тоже подходят.\r\n" +
         "Не подходит: Digispark Pro, обычные Arduino и платы без micronucleus.\r\n\r\n" +
+        "Права администратора\r\n" +
+        "Windows спрашивает их при запуске.\r\n" +
+        "Без них боковая кнопка мыши не ловится в игре, запущенной от администратора.\r\n" +
+        "Команда на плату и прошивка тоже обычно не проходят.\r\n\r\n" +
         "Плата сама тапает клавишу. Программа её включает и выключает.\r\n\r\n" +
         "Связь\r\n" +
         "Кружок сверху — плата на USB. В трее то же: зелёный TAP — на связи, красный — нет.\r\n\r\n" +
@@ -56,8 +60,8 @@ internal static class Program {
         "Клавиша — что тапает плата. Нажми поле и клавишу на клавиатуре.\r\n" +
         "Команда — чем включать: боковая кнопка мыши или сочетание, например Ctrl+A.\r\n" +
         "После новой команды окно отпускает фокус, чтобы тап не попал сюда.\r\n" +
-        "Скорость: 1 — случайно 250–1000 мс, к 10 быстрее.\r\n" +
-        "Маячок справа от ползунка моргает так же, как плата после прошивки.\r\n" +
+        "Скорость: 1 — чаще 209–322 мс, 10 — чаще 49–282 мс. Короткие и длинные паузы реже.\r\n" +
+        "Маячок у ползунка моргает в том же ритме.\r\n" +
         "Если плата не приняла настройку — нажми «Прошить».\r\n\r\n" +
         "Прошивка\r\n" +
         "1. Нажми «Прошить». Тапер при этом выключается.\r\n" +
@@ -89,7 +93,6 @@ internal static class Program {
     private static int _capture;
     private static byte _tapScan = 9;
     private static byte _tapSpeed = 5;
-    private static int _slowMin = 368, _slowMax = 1129, _slowN = 20, _fastMin = 79, _fastMax = 705, _fastN = 44;
     private static string _tapName = "F";
     private static int _cmdMode = 3;
     private static int _cmdVk;
@@ -278,6 +281,7 @@ internal static class Program {
         private readonly Timer _paceTimer;
         private readonly Random _paceRng = new Random();
         private bool _paceOn;
+        private static readonly Color PaceOn = Color.FromArgb(176, 122, 118);
 
         public SettingsPane() {
             Size = new Size(440, 88);
@@ -314,7 +318,7 @@ internal static class Program {
             var spd = new TrackBar();
             spd.AutoSize = false;
             spd.Location = new Point(76, 50);
-            spd.Size = new Size(196, 28);
+            spd.Size = new Size(200, 28);
             spd.Minimum = 1;
             spd.Maximum = 10;
             spd.Value = 5;
@@ -327,7 +331,8 @@ internal static class Program {
             SpeedBar = spd;
 
             _pace = new RoundLamp();
-            _pace.Location = new Point(280, 54);
+            _pace.Size = new Size(12, 12);
+            _pace.Location = new Point(282, 58);
             Controls.Add(_pace);
             _paceTimer = new Timer();
             _paceTimer.Tick += delegate { OnPaceTick(); };
@@ -351,7 +356,7 @@ internal static class Program {
         private void KickPace() {
             if (!Visible || _pace == null) return;
             _paceOn = true;
-            _pace.Fill = Color.OrangeRed;
+            _pace.Fill = PaceOn;
             _paceTimer.Stop();
             _paceTimer.Interval = 80;
             _paceTimer.Start();
@@ -363,13 +368,15 @@ internal static class Program {
                 _pace.Fill = Color.FromArgb(180, 184, 192);
                 int lo, hi;
                 PauseRange(SpeedBar.Value, out lo, out hi);
-                int ms = hi > lo ? lo + _paceRng.Next(hi - lo + 1) : lo;
+                int span = hi - lo;
+                int ms = lo;
+                if (span > 0) ms = lo + (_paceRng.Next(span + 1) + _paceRng.Next(span + 1)) / 2;
                 if (ms < 20) ms = 20;
                 _paceTimer.Interval = ms;
                 return;
             }
             _paceOn = true;
-            _pace.Fill = Color.OrangeRed;
+            _pace.Fill = PaceOn;
             _paceTimer.Interval = 80;
         }
     }
@@ -393,6 +400,7 @@ internal static class Program {
             StartPosition = FormStartPosition.Manual;
             Location = new Point(40, 40);
             ClientSize = new Size(440, BodyH);
+            Icon = LoadAppIcon();
             TopMost = true;
             ShowInTaskbar = true;
             BackColor = UiBg;
@@ -567,11 +575,47 @@ internal static class Program {
         _ui.PowerText.Text = _enabled ? "тапер: вкл" : "тапер: выкл";
     }
 
+    private static Icon LoadAppIcon() {
+        var path = Application.ExecutablePath;
+        try {
+            if (!string.IsNullOrEmpty(path) && path.Length > 2 && path[1] == ':') {
+                var ic = Icon.ExtractAssociatedIcon(path);
+                if (ic != null) return ic;
+            }
+        } catch { }
+        try {
+            var large = new IntPtr[1];
+            if (!string.IsNullOrEmpty(path) && ExtractIconEx(path, 0, large, null, 1) > 0 && large[0] != IntPtr.Zero) {
+                Icon clone;
+                using (var tmp = Icon.FromHandle(large[0])) clone = (Icon)tmp.Clone();
+                DestroyIcon(large[0]);
+                return clone;
+            }
+        } catch { }
+        return SystemIcons.Application;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint n);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr h);
+
     [STAThread]
     static void Main() {
+        try {
+            Run();
+        } catch (Exception ex) {
+            MessageBox.Show(ex.Message, "F-Tapper");
+        }
+    }
+
+    static void Run() {
         bool created;
         using (new System.Threading.Mutex(true, "F-Tapper-single-instance", out created)) {
-            if (!created) return;
+            if (!created) {
+                MessageBox.Show("F-Tapper уже запущен.", "F-Tapper");
+                return;
+            }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -891,13 +935,7 @@ internal static class Program {
                     } else if (line.StartsWith("speed=")) {
                         int n;
                         if (int.TryParse(line.Substring(6).Trim(), out n) && n >= 1 && n <= 10) _tapSpeed = (byte)n;
-                    } else if (line.StartsWith("slowMin=")) _slowMin = ReadInt(line, 8);
-                    else if (line.StartsWith("slowMax=")) _slowMax = ReadInt(line, 8);
-                    else if (line.StartsWith("slowN=")) _slowN = ReadInt(line, 6);
-                    else if (line.StartsWith("fastMin=")) _fastMin = ReadInt(line, 8);
-                    else if (line.StartsWith("fastMax=")) _fastMax = ReadInt(line, 8);
-                    else if (line.StartsWith("fastN=")) _fastN = ReadInt(line, 6);
-                    else if (line.StartsWith("mods=")) {
+                    } else if (line.StartsWith("mods=")) {
                         int n;
                         if (int.TryParse(line.Substring(5).Trim(), out n)) _cmdMods = n;
                     }
@@ -926,13 +964,7 @@ internal static class Program {
                 "cmd=" + cmd + Environment.NewLine +
                 "vk=" + _cmdVk.ToString() + Environment.NewLine +
                 "mods=" + _cmdMods.ToString() + Environment.NewLine +
-                "speed=" + ((int)_tapSpeed).ToString() + Environment.NewLine +
-                "slowMin=" + _slowMin.ToString() + Environment.NewLine +
-                "slowMax=" + _slowMax.ToString() + Environment.NewLine +
-                "slowN=" + _slowN.ToString() + Environment.NewLine +
-                "fastMin=" + _fastMin.ToString() + Environment.NewLine +
-                "fastMax=" + _fastMax.ToString() + Environment.NewLine +
-                "fastN=" + _fastN.ToString() + Environment.NewLine);
+                "speed=" + ((int)_tapSpeed).ToString() + Environment.NewLine);
         } catch {
         }
     }
@@ -946,19 +978,13 @@ internal static class Program {
         }
     }
 
-    private static int ReadInt(string line, int from) {
-        int n;
-        if (int.TryParse(line.Substring(from).Trim(), out n) && n > 0) return n;
-        return 0;
-    }
-
     private static void PauseRange(int speed, out int lo, out int hi) {
         if (speed < 1) speed = 1;
         if (speed > 10) speed = 10;
-        lo = 250 + (1 - speed) * 100;
-        hi = 1000 + (1 - speed) * 100;
-        if (lo < 20) lo = 20;
-        if (hi > 2550) hi = 2550;
+        int k = speed - 1;
+        lo = 209 + (49 - 209) * k / 9;
+        hi = 322 + (282 - 322) * k / 9;
+        if (lo < 40) lo = 40;
         if (hi < lo) hi = lo;
     }
 
@@ -966,7 +992,7 @@ internal static class Program {
         int lo, hi;
         PauseRange(_tapSpeed, out lo, out hi);
         int loB = lo / 10;
-        int hiB = hi / 10;
+        int hiB = (hi + 9) / 10;
         if (loB < 2) loB = 2;
         if (hiB > 255) hiB = 255;
         if (hiB < loB) hiB = loB;

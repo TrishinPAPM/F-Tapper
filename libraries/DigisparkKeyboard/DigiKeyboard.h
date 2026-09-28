@@ -30,8 +30,8 @@ volatile uchar hidDebounce = 0;
 volatile bool tapEnabled = false;
 volatile uchar tapKey = 9;
 volatile uchar tapSpeed = 5;
-volatile unsigned tapGapLo = 250;
-volatile unsigned tapGapHi = 1000;
+volatile unsigned tapGapLo = 130;
+volatile unsigned tapGapHi = 310;
 const uchar fwStamp[8] PROGMEM = { 0x46, 0x54, 0x41, 0x50, 0xA5, 0x00, 0x00, 0x00 };
 static uchar fwIdReply[3];
 
