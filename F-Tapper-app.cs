@@ -45,6 +45,7 @@ internal static class Program {
     private static DateTime _cmdMouseAt = DateTime.MinValue;
     private static bool _needEnableSync;
     private static DateTime _linkAt = DateTime.MinValue;
+    private static bool _resumeAfterCapture;
 
     private static readonly Color UiBg = Color.FromArgb(246, 247, 250);
     private static readonly Color UiText = Color.FromArgb(28, 28, 30);
@@ -763,7 +764,7 @@ internal static class Program {
     }
 
     private static void Fire() {
-        if (_flashing) return;
+        if (_flashing || _capture != 0) return;
         if ((DateTime.UtcNow - _lastSend).TotalMilliseconds < 400) return;
         string t = DateTime.Now.ToString("HH:mm:ss");
         ShowService(Color.Gold, "сигнал: " + t + " поймал");
@@ -866,6 +867,15 @@ internal static class Program {
     private static void BeginCapture(int mode) {
         _capture = mode;
         _cmdMousePending = 0;
+        _resumeAfterCapture = _enabled;
+        if (_enabled) {
+            if (SetTapper(false)) {
+                _enabled = false;
+                ShowPower();
+            } else {
+                _resumeAfterCapture = false;
+            }
+        }
         if (_ui != null && !_ui.IsDisposed) {
             ShowWindow();
             _ui.Focus();
@@ -876,9 +886,23 @@ internal static class Program {
             SetHint("Боковая кнопка; для обеих — нажми Back и Forward за 0.5 с. Esc — отмена.");
     }
 
-    private static void CancelCapture() {
+    private static void EndCapture() {
         _capture = 0;
         _cmdMousePending = 0;
+    }
+
+    private static void ResumeTapperIfPaused() {
+        if (!_resumeAfterCapture) return;
+        _resumeAfterCapture = false;
+        if (SetTapper(true)) {
+            _enabled = true;
+            ShowPower();
+        }
+    }
+
+    private static void CancelCapture() {
+        EndCapture();
+        ResumeTapperIfPaused();
         if (_needFlash)
             SetHint("Нужно прошить плату, чтобы применить настройки. Нажми «Прошить».");
         else
@@ -908,7 +932,7 @@ internal static class Program {
         }
         _tapScan = hid;
         _tapName = KeyName(k);
-        _capture = 0;
+        EndCapture();
         SaveSettings();
         RefreshSettingFields();
         if (PushTapKey()) {
@@ -917,17 +941,19 @@ internal static class Program {
         } else {
             TellNeedFlash("Клавиша " + _tapName + " сохранена, но плата её не приняла.");
         }
+        ResumeTapperIfPaused();
     }
 
     private static void ApplyCmdKey(Keys k, Keys mods) {
         _cmdMode = 0;
         _cmdVk = (int)k;
         _cmdMods = (int)(mods & (Keys.Control | Keys.Shift | Keys.Alt));
-        _capture = 0;
+        EndCapture();
         SaveSettings();
         RefreshSettingFields();
         DropOwnFocus();
         SetHint("Команда: " + CmdLabel() + ". Этим включай и выключай.");
+        ResumeTapperIfPaused();
     }
 
     private static void ApplyCmdMouse(int xbtn) {
@@ -948,12 +974,12 @@ internal static class Program {
         _cmdMods = 0;
         if (modeOrBtn == 3) _cmdMode = 3;
         else _cmdMode = (modeOrBtn == XBUTTON1) ? 1 : 2;
-        _cmdMousePending = 0;
-        _capture = 0;
+        EndCapture();
         SaveSettings();
         RefreshSettingFields();
         DropOwnFocus();
         SetHint("Команда: " + CmdLabel() + ". Этой кнопкой включай и выключай.");
+        ResumeTapperIfPaused();
     }
 
     private static void LoadSettings() {
