@@ -45,7 +45,9 @@ internal static class Program {
     private static DateTime _cmdMouseAt = DateTime.MinValue;
     private static bool _needEnableSync;
     private static DateTime _linkAt = DateTime.MinValue;
+    private static int _linkMiss;
     private static bool _resumeAfterCapture;
+    private static int _fireBusy;
 
     private static readonly Color UiBg = Color.FromArgb(246, 247, 250);
     private static readonly Color UiText = Color.FromArgb(28, 28, 30);
@@ -686,13 +688,6 @@ internal static class Program {
         return PathHasVidPid(path, BootVidPid);
     }
 
-    private static bool CmdWantsX(int xbtn) {
-        if (_cmdMode == 0) return false;
-        if (xbtn == XBUTTON1) return (_cmdMode & 1) != 0;
-        if (xbtn == XBUTTON2) return (_cmdMode & 2) != 0;
-        return false;
-    }
-
     private static bool ModHeld(int vk) {
         if ((GetAsyncKeyState(vk) & 0x8000) != 0) return true;
         if (vk == 0x11) return (GetAsyncKeyState(0xA2) & 0x8000) != 0 || (GetAsyncKeyState(0xA3) & 0x8000) != 0;
@@ -757,7 +752,7 @@ internal static class Program {
             if ((buttonFlags & RI_MOUSE_BUTTON_4_DOWN) != 0) xbtn = XBUTTON1;
             else if ((buttonFlags & RI_MOUSE_BUTTON_5_DOWN) != 0) xbtn = XBUTTON2;
             if (xbtn == 0) return;
-            if (_capture == 2) ApplyCmdMouse(xbtn);
+            if (_capture == 2) NoteCmdMouse(xbtn);
         } finally {
             Marshal.FreeHGlobal(buf);
         }
@@ -766,19 +761,29 @@ internal static class Program {
     private static void Fire() {
         if (_flashing || _capture != 0) return;
         if ((DateTime.UtcNow - _lastSend).TotalMilliseconds < 400) return;
+        if (System.Threading.Interlocked.CompareExchange(ref _fireBusy, 1, 0) != 0) return;
+        _lastSend = DateTime.UtcNow;
         string t = DateTime.Now.ToString("HH:mm:ss");
         ShowService(Color.Gold, "сигнал: " + t + " поймал");
         bool want = !_enabled;
-        bool ok = SetTapper(want);
-        if (ok) {
-            _lastSend = DateTime.UtcNow;
-            _enabled = want;
-            ShowPower();
-            ShowService(Color.Lime, "сигнал: " + t + " OK");
-        } else {
-            _lastSend = DateTime.UtcNow.AddMilliseconds(-300);
-            ShowService(Color.OrangeRed, "сигнал: " + t + " FAIL");
-        }
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate {
+            bool ok = false;
+            try { ok = SetTapper(want); } catch { ok = false; }
+            Action done = delegate {
+                if (ok) {
+                    _lastSend = DateTime.UtcNow;
+                    _enabled = want;
+                    ShowPower();
+                    ShowService(Color.Lime, "сигнал: " + t + " OK");
+                } else {
+                    _lastSend = DateTime.UtcNow.AddMilliseconds(-300);
+                    ShowService(Color.OrangeRed, "сигнал: " + t + " FAIL");
+                }
+                System.Threading.Interlocked.Exchange(ref _fireBusy, 0);
+            };
+            if (_ui != null && !_ui.IsDisposed) _ui.BeginInvoke(done);
+            else done();
+        });
     }
 
     private static string SettingsPath() {
@@ -865,14 +870,15 @@ internal static class Program {
     }
 
     private static void BeginCapture(int mode) {
+        bool again = _capture != 0;
         _capture = mode;
         _cmdMousePending = 0;
-        _resumeAfterCapture = _enabled;
+        if (!again) _resumeAfterCapture = _enabled;
         if (_enabled) {
             if (SetTapper(false)) {
                 _enabled = false;
                 ShowPower();
-            } else {
+            } else if (!again) {
                 _resumeAfterCapture = false;
             }
         }
@@ -891,18 +897,21 @@ internal static class Program {
         _cmdMousePending = 0;
     }
 
-    private static void ResumeTapperIfPaused() {
-        if (!_resumeAfterCapture) return;
+    private static bool ResumeTapperIfPaused() {
+        if (!_resumeAfterCapture) return true;
         _resumeAfterCapture = false;
         if (SetTapper(true)) {
             _enabled = true;
             ShowPower();
+            return true;
         }
+        ShowService(Color.OrangeRed, "Тапер не включился обратно.");
+        return false;
     }
 
     private static void CancelCapture() {
         EndCapture();
-        ResumeTapperIfPaused();
+        if (!ResumeTapperIfPaused()) return;
         if (_needFlash)
             SetHint("Нужно прошить плату, чтобы применить настройки. Нажми «Прошить».");
         else
@@ -956,7 +965,7 @@ internal static class Program {
         ResumeTapperIfPaused();
     }
 
-    private static void ApplyCmdMouse(int xbtn) {
+    private static void NoteCmdMouse(int xbtn) {
         if (_capture != 2) return;
         if (_cmdMousePending == 0) {
             _cmdMousePending = xbtn;
@@ -964,8 +973,8 @@ internal static class Program {
             SetHint("Ещё нажми другую боковую для «обе», или подожди 0.5 с.");
             return;
         }
-        if (_cmdMousePending != xbtn) FinishCmdMouse(3);
-        else FinishCmdMouse(xbtn);
+        if (_cmdMousePending == xbtn) return;
+        FinishCmdMouse(3);
     }
 
     private static void FinishCmdMouse(int modeOrBtn) {
@@ -1054,10 +1063,13 @@ internal static class Program {
         }
     }
 
-    private static bool? ReadTapEnabled() {
+    private static bool ReadFeature(out byte[] stamp, out bool enabled, out bool hasEnabled) {
+        stamp = null;
+        enabled = false;
+        hasEnabled = false;
         Guid g = HidGuid;
         IntPtr list = SetupDiGetClassDevs(ref g, null, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-        if (list == IntPtr.Zero || list == new IntPtr(-1)) return null;
+        if (list == IntPtr.Zero || list == new IntPtr(-1)) return false;
         try {
             for (uint i = 0; ; i++) {
                 var did = new SP_DEVICE_INTERFACE_DATA();
@@ -1073,18 +1085,29 @@ internal static class Program {
                     if (path == null || !PathIsOurBoard(path)) continue;
                     using (SafeFileHandle h = OpenHid(path)) {
                         if (h == null || h.IsInvalid) continue;
-                        int featLen = 0;
+                        int featLen = 5;
                         IntPtr pre;
                         if (HidD_GetPreparsedData(h, out pre)) {
                             HIDP_CAPS caps;
                             HidP_GetCaps(pre, out caps);
-                            featLen = caps.FeatureReportByteLength;
+                            if (caps.FeatureReportByteLength > 0) featLen = caps.FeatureReportByteLength;
                             HidD_FreePreparsedData(pre);
                         }
-                        if (featLen < 5) return null;
-                        byte[] buf = new byte[featLen];
-                        if (!HidD_GetFeature(h, buf, buf.Length)) continue;
-                        return buf[4] != 0;
+                        int n = Math.Max(featLen, 5);
+                        byte[] buf = new byte[n];
+                        if (!HidD_GetFeature(h, buf, buf.Length)) {
+                            if (featLen < 4 || featLen == n) continue;
+                            buf = new byte[featLen];
+                            if (!HidD_GetFeature(h, buf, buf.Length)) continue;
+                        }
+                        int off = (buf.Length >= 5 && buf[0] == 0) ? 1 : 0;
+                        if (buf.Length < off + 3) continue;
+                        stamp = new byte[] { buf[off], buf[off + 1], buf[off + 2] };
+                        if (buf.Length >= off + 4) {
+                            enabled = buf[off + 3] != 0;
+                            hasEnabled = true;
+                        }
+                        return true;
                     }
                 } finally {
                     Marshal.FreeHGlobal(det);
@@ -1093,17 +1116,20 @@ internal static class Program {
         } finally {
             SetupDiDestroyDeviceInfoList(list);
         }
-        return null;
+        return false;
+    }
+
+    private static bool? ReadTapEnabled() {
+        byte[] stamp;
+        bool enabled, hasEnabled;
+        if (!ReadFeature(out stamp, out enabled, out hasEnabled) || !hasEnabled) return null;
+        return enabled;
     }
 
     private static bool SetTapper(bool on) {
         if (!SendCommand(new byte[] { on ? HidCmdOn : HidCmdOff })) return false;
-        System.Threading.Thread.Sleep(30);
         bool? got = ReadTapEnabled();
-        if (got == null) {
-            if (!SendCommand(new byte[] { HidCmdToggle })) return false;
-            return true;
-        }
+        if (got == null) return true;
         return got.Value == on;
     }
 
@@ -1394,47 +1420,11 @@ internal static class Program {
     }
 
     private static byte[] ReadBoardStamp() {
-        Guid g = HidGuid;
-        IntPtr list = SetupDiGetClassDevs(ref g, null, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-        if (list == IntPtr.Zero || list == new IntPtr(-1)) return null;
-        try {
-            for (uint i = 0; ; i++) {
-                var did = new SP_DEVICE_INTERFACE_DATA();
-                did.cbSize = Marshal.SizeOf(did);
-                if (!SetupDiEnumDeviceInterfaces(list, IntPtr.Zero, ref g, i, ref did)) break;
-                uint need;
-                SetupDiGetDeviceInterfaceDetail(list, ref did, IntPtr.Zero, 0, out need, IntPtr.Zero);
-                IntPtr det = Marshal.AllocHGlobal((int)need);
-                try {
-                    Marshal.WriteInt32(det, IntPtr.Size == 8 ? 8 : 6);
-                    if (!SetupDiGetDeviceInterfaceDetail(list, ref did, det, need, out need, IntPtr.Zero)) continue;
-                    string path = ReadHidPath(det);
-                    if (path == null) continue;
-                    if (!PathIsOurBoard(path)) continue;
-                    using (SafeFileHandle h = OpenHid(path)) {
-                        if (h == null || h.IsInvalid) continue;
-                        int featLen = 4;
-                        IntPtr pre;
-                        if (HidD_GetPreparsedData(h, out pre)) {
-                            HIDP_CAPS caps;
-                            HidP_GetCaps(pre, out caps);
-                            if (caps.FeatureReportByteLength > 0) featLen = caps.FeatureReportByteLength;
-                            HidD_FreePreparsedData(pre);
-                        }
-                        if (featLen < 4) continue;
-                        byte[] buf = new byte[featLen];
-                        if (!HidD_GetFeature(h, buf, buf.Length)) continue;
-                        if (buf[1] == 0 && buf[2] == 0 && buf[3] == 0) continue;
-                        return new byte[] { buf[1], buf[2], buf[3] };
-                    }
-                } finally {
-                    Marshal.FreeHGlobal(det);
-                }
-            }
-        } finally {
-            SetupDiDestroyDeviceInfoList(list);
-        }
-        return null;
+        byte[] stamp;
+        bool enabled, hasEnabled;
+        if (!ReadFeature(out stamp, out enabled, out hasEnabled)) return null;
+        if (stamp == null || (stamp[0] == 0 && stamp[1] == 0 && stamp[2] == 0)) return null;
+        return stamp;
     }
 
     private static void OnFlashBtn() {
@@ -1772,7 +1762,13 @@ internal static class Program {
                 }
             }
         }
-        if (!on) _needEnableSync = false;
+        if (!on) {
+            _linkMiss++;
+            if (_linkMiss < 3) return;
+            _needEnableSync = false;
+        } else {
+            _linkMiss = 0;
+        }
         if (on == _boardLinked && _tray.Icon != null) return;
         _boardLinked = on;
         _tray.Icon = on ? _iconOn : _iconOff;
@@ -1881,7 +1877,7 @@ internal static class Program {
                 var hs = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
                 int xbtn = (hs.mouseData >> 16) & 0xFFFF;
                 if ((xbtn == XBUTTON1 || xbtn == XBUTTON2) && _capture == 2)
-                    ApplyCmdMouse(xbtn);
+                    NoteCmdMouse(xbtn);
             }
         }
         return CallNextHookEx(_hook, nCode, wParam, lParam);

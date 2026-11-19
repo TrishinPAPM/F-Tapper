@@ -302,12 +302,12 @@ uchar usbFunctionWrite(uchar *data, uchar len) {
     }
     if (cmd == 0xA8 && hidCmdArmed) {
         tapEnabled = 0;
-        hidDebounce = 50;
+        hidDebounce = 250;
         return 1;
     }
     if (cmd == 0xA9 && hidCmdArmed) {
         tapEnabled = 1;
-        hidDebounce = 50;
+        hidDebounce = 250;
         return 1;
     }
     return 1;
